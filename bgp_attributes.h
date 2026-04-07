@@ -2,8 +2,8 @@
 // Created by andrew on 3/25/26.
 //
 
-#ifndef NETWORK_BRAIN_BGP_ATTRIBUTES_H
-#define NETWORK_BRAIN_BGP_ATTRIBUTES_H
+#ifndef BGP_ATTRIBUTES_H
+#define BGP_ATTRIBUTES_H
 
 /** @enum BGP_TYPES
  * @brief Enumeration for BGP packet types
