@@ -1,8 +1,9 @@
 #include <asm-generic/types.h>
 #include <stdbool.h>
-#include <arpa/inet.h>
 #include <string.h>
+#include <arpa/inet.h>
 #include <stdio.h>
+#include "bgp.h"
 #include "bgp_attributes.h"
 
 const __u8 FLAG_UNSET = 0;
@@ -18,18 +19,6 @@ struct attrib {
     void *attr_len_p;
 };
 
-/** @struct bgp_header
- * @brief Structure to overlay over a buffer to extract a BGP header
- */
-struct bgp_header {
-    union {
-        unsigned char header[16]; /**< BGP Header first 16 bytes (should always be 0xFF per byte */
-        __u64 head[2]; /**< Overlay of first 16 bytes to two __u64's */
-    }; /**< Anonymous union covering the first 16 bytes of the header */
-    __u16 length; /**< BGP Header length (Network Byte Order */
-    __u8 type; /**< BGP Packet type */
-} __attribute__((__packed__));
-
 #ifndef IPV4_AFI
 #define IPV4_AFI 1
 #endif
@@ -41,6 +30,60 @@ struct bgp_header {
 #ifndef SR_POLICY_SAFI
 #define SR_POLICY_SAFI 73
 #endif
+
+#define TUNNEL_ENCAP_ATTRIBUTE 23
+
+struct sr_preference_tlv {
+    __u8 type;
+    __u8 length;
+    __u8 flags;
+    __u8 reserved;
+    __u32 preference;
+} __attribute__((__packed__));
+
+struct sr_binding_tlv {
+    __u8 type;
+    __u8 length;
+    __u8 flags;
+    __u8 reserved;
+    __u32 sid;
+} __attribute__((__packed__));
+
+struct sr_priority_tlv {
+    __u8 type;
+    __u8 length;
+    __u8 priority;
+    __u8 reserved;
+} __attribute__((__packed__));
+
+struct sr_weight_tlv {
+    __u8 type;
+    __u8 length;
+    __u8 flags;
+    __u8 reserved;
+    __u32 weight;
+};
+struct sr_segment_list {
+    __u8 type;
+    __u16 length;
+    __u8 reserved;
+} __attribute__((__packed__));;
+
+struct sr_sid_type_a {
+    __u8 type;
+    __u8 length;
+    __u8 flags;
+    __u8 reserved;
+    __u32 label;
+};
+struct tunnel_encap_sr_policy {
+    __u16 type;
+    __u16 type_len;
+    struct sr_preference_tlv preference;
+    struct sr_binding_tlv binding;
+    struct sr_priority_tlv priority;
+    struct sr_segment_list segments;
+} __attribute__((__packed__));
 
 void dump_buffer(void *buffer,__u16 size)
 {
@@ -273,7 +316,6 @@ int add_mp_bgp_nlri(struct bgp_header *hdr, const __u16 afi, const __u8 safi, co
     if ((ptr[0] & FLAG_EXTENDED) == FLAG_EXTENDED) {
         attr_len = htons(*(__u16*)&ptr[2]);
         use_extended = true;
-        dump_buffer(data_ptr, attr_len+4);
         data_ptr = ptr+attr_len+4;
     } else {
         attr_len = ptr[2];
@@ -359,6 +401,135 @@ int add_mp_bgp(struct bgp_header *hdr, __u16 afi, const __u8 safi, const char *n
     return 0;
 }
 
+
+int sr_policy_set_binding(struct tunnel_encap_sr_policy *srp, __u32 binding_sid) {
+    if (!srp)
+        return -1;
+    srp->binding.type = 13;
+    srp->binding.length = 6;
+    srp->binding.flags = 0;
+    __u8 *sid = (__u8*)&binding_sid;
+    srp->binding.sid = (__u32)(sid[0]) << 16 | (__u32)(sid[1]) << 8 | (__u32)(sid[2]);
+    return 0;
+}
+
+void add_tunnel_encap_attribute(struct bgp_header *hdr) {
+    add_attrib_hdr(hdr, FLAG_OPTIONAL|FLAG_TRANSITIVE, TUNNEL_ENCAP_ATTRIBUTE);
+    increment_lengths(hdr, 2);
+}
+
+int append_sr_tunnel_tlv(struct bgp_header *hdr) {
+    char *attr = bgp_find_attribute(hdr, TUNNEL_ENCAP_ATTRIBUTE);
+    if (!attr)
+        return -1;
+    *(__u16*)&attr[3] = htons(15);
+    *(__u16*)&attr[5] = 0;
+    attr[2] += 4;
+    increment_lengths(hdr, 4);
+    return 0;
+}
+
+int append_tunnel_encap_preference_tlv(struct bgp_header *hdr, const __u32 preference) {
+    char *attr = bgp_find_attribute(hdr, TUNNEL_ENCAP_ATTRIBUTE);
+    if (!attr)
+        return -1;
+    char *attr_len_p = &attr[2];
+    __u16 *tunnel_encap_len_p = (__u16*)&attr[5];
+    char *data_ptr = attr+(*attr_len_p)+3;
+    struct sr_preference_tlv srp = {0};
+    srp.type = 12;
+    srp.preference = htonl(preference);
+    srp.length = 6;
+    memcpy(data_ptr, &srp, sizeof(srp));
+    *attr_len_p += 8;
+    *tunnel_encap_len_p = htons(ntohs(*tunnel_encap_len_p)+8);
+    increment_lengths(hdr, 7);
+    return 0;
+}
+
+int append_tunnel_encap_priority_tlv(struct bgp_header *hdr, const __u8 priority) {
+    char *attr = bgp_find_attribute(hdr, TUNNEL_ENCAP_ATTRIBUTE);
+    if (!attr)
+        return -1;
+    char *attr_len_p = &attr[2];
+    __u16 *tunnel_encap_len_p = (__u16*)&attr[5];
+    char *data_ptr = attr+(*attr_len_p)+3;
+    struct sr_priority_tlv srp = {0};
+    srp.type = 15;
+    srp.length = 2;
+    srp.priority = priority;
+    memcpy(data_ptr, &srp, sizeof(srp));
+    *tunnel_encap_len_p = htons(ntohs(*tunnel_encap_len_p)+4);
+    *attr_len_p += 4;
+    increment_lengths(hdr, 4);
+    return 0;
+}
+
+int append_tunnel_encap_binding4_tlv(struct bgp_header *hdr, const __u32 binding_sid) {
+    char *attr = bgp_find_attribute(hdr, TUNNEL_ENCAP_ATTRIBUTE);
+    if (!attr)
+        return -1;
+    char *attr_len_p = &attr[2];
+    __u16 *tunnel_encap_len_p = (__u16*)&attr[5];
+    char *data_ptr = attr+(*attr_len_p)+3;
+    struct sr_binding_tlv srb = {0};
+    srb.type = 13;
+    srb.length = 6;
+    srb.flags = 0;
+    __u8 *sid = (__u8*)&binding_sid;
+    srb.sid = (__u32)(sid[0]) << 16 | (__u32)(sid[1]) << 8 | (__u32)(sid[2]);
+    memcpy(data_ptr, &srb, sizeof(srb));
+    *attr_len_p += 8;
+    *tunnel_encap_len_p = htons(ntohs(*tunnel_encap_len_p)+8);
+    increment_lengths(hdr, 8);
+    return 0;
+}
+
+int append_segment_list_tlv(struct bgp_header *hdr, const int n_sids, const __u32 *sid_list,
+    const bool add_weight, const __u32 weight) {
+    char *attr = bgp_find_attribute(hdr, TUNNEL_ENCAP_ATTRIBUTE);
+    if (!attr)
+        return -1;
+    int increment_len = 4; // Minimum size
+    char *attr_len_p = &attr[2];
+    __u16 *tunnel_encap_len_p = (__u16*)&attr[5];
+    char *data_ptr = attr+(*attr_len_p)+3;
+    struct sr_segment_list srl = {0};
+    srl.type = 128;
+    memcpy(data_ptr, &srl, sizeof(srl));
+    __u16 *sr_list_len_p = (__u16*)&data_ptr[1];
+    char *srp = &data_ptr[4];
+    if (add_weight) {
+        struct sr_weight_tlv srw = {0};
+        srw.type = 9;
+        srw.length = 6;
+        srw.weight = htonl(weight);
+        memcpy(srp, &srw, 8);
+        srp+=8;
+        *sr_list_len_p = htons(ntohs(*sr_list_len_p)+8);
+        increment_len+=8;
+    }
+    if (n_sids > 0 && sid_list) {
+        for (int i = 0; i < n_sids; i++) {
+            struct sr_sid_type_a srs = {0};
+            srs.type = 1;
+            srs.length = 6;
+            srs.flags = 0;
+            const __u8 *sid =  (__u8*)&sid_list[i];
+            srs.label = (__u32)(sid[0]) << 16 | (__u32)(sid[1]) << 8 | (__u32)(sid[2]);
+            srs.label = srs.label >> 8;
+            memcpy(srp, &srs, 8);
+            srp+=8;
+            *sr_list_len_p = htons(ntohs(*sr_list_len_p)+8);
+            increment_len+=8;
+        }
+    }
+    *attr_len_p += increment_len;
+    *tunnel_encap_len_p = htons(ntohs(*tunnel_encap_len_p)+increment_len);
+    increment_lengths(hdr, increment_len);
+    return 0;
+}
+
 int main() {
     char update[4096] = {0}; // As per RFC4271 BGP updates cannot exceed 4096 bytes
     struct bgp_header *hdr = construct_update_header(update);
@@ -373,5 +544,12 @@ int main() {
     add_route_target4(hdr, "10.20.30.1", 0);
     add_asn(hdr, 65001);
     add_asn(hdr, 65002);
+    add_tunnel_encap_attribute(hdr);
+    append_sr_tunnel_tlv(hdr);
+    append_tunnel_encap_preference_tlv(hdr, 100);
+    append_tunnel_encap_priority_tlv(hdr, 10);
+    append_tunnel_encap_binding4_tlv(hdr, 1000000);
+    __u32 sid_list[3] = { 16002, 16003, 16033 };
+    append_segment_list_tlv(hdr, 3, (__u32*)sid_list, true, 20);
     dump_buffer(hdr, ntohs(hdr->length));
 }
