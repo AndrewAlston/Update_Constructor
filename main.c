@@ -401,18 +401,6 @@ int add_mp_bgp(struct bgp_header *hdr, __u16 afi, const __u8 safi, const char *n
     return 0;
 }
 
-
-int sr_policy_set_binding(struct tunnel_encap_sr_policy *srp, __u32 binding_sid) {
-    if (!srp)
-        return -1;
-    srp->binding.type = 13;
-    srp->binding.length = 6;
-    srp->binding.flags = 0;
-    __u8 *sid = (__u8*)&binding_sid;
-    srp->binding.sid = (__u32)(sid[0]) << 16 | (__u32)(sid[1]) << 8 | (__u32)(sid[2]);
-    return 0;
-}
-
 void add_tunnel_encap_attribute(struct bgp_header *hdr) {
     add_attrib_hdr(hdr, FLAG_OPTIONAL|FLAG_TRANSITIVE, TUNNEL_ENCAP_ATTRIBUTE);
     increment_lengths(hdr, 2);
@@ -478,6 +466,7 @@ int append_tunnel_encap_binding4_tlv(struct bgp_header *hdr, const __u32 binding
     srb.flags = 0;
     __u8 *sid = (__u8*)&binding_sid;
     srb.sid = (__u32)(sid[0]) << 16 | (__u32)(sid[1]) << 8 | (__u32)(sid[2]);
+    srb.sid = srb.sid >> 8;
     memcpy(data_ptr, &srb, sizeof(srb));
     *attr_len_p += 8;
     *tunnel_encap_len_p = htons(ntohs(*tunnel_encap_len_p)+8);
